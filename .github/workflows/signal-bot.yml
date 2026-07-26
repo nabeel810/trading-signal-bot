@@ -1,0 +1,40 @@
+name: Trading Signal Bot
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"   # يعمل كل 5 دقائق تلقائياً
+  workflow_dispatch:         # يسمح بتشغيله يدوياً من واجهة GitHub أيضاً
+
+permissions:
+  contents: write            # مطلوب لحفظ ملف state.json داخل المستودع
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: تنزيل الكود
+        uses: actions/checkout@v4
+
+      - name: تجهيز Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: تثبيت المكتبات
+        run: pip install -r requirements.txt
+
+      - name: تشغيل البوت
+        env:
+          TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          PAIR: ${{ secrets.PAIR }}
+        run: python signal_bot.py
+
+      - name: حفظ حالة آخر إشارة (state.json)
+        run: |
+          git config user.name "signal-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add state.json || true
+          git diff --quiet && git diff --staged --quiet || git commit -m "تحديث حالة البوت [skip ci]"
+          git push || true
