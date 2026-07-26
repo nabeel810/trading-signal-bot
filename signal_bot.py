@@ -293,8 +293,13 @@ def is_near_high_impact_news(pair):
 def load_state():
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE, "r") as f:
-            return json.load(f)
-    return {"last_signal": {}, "open_trades": {}}
+            state = json.load(f)
+    else:
+        state = {}
+    # تحصين ضد ملف state.json بتنسيق قديم أو ناقص المفاتيح
+    state.setdefault("last_signal", {})
+    state.setdefault("open_trades", {})
+    return state
 
 
 def save_state(state):
