@@ -11,6 +11,7 @@
 
 import os
 import json
+import time
 import requests
 import pandas as pd
 import numpy as np
@@ -20,12 +21,27 @@ from datetime import datetime, timezone
 TWELVEDATA_API_KEY = os.environ.get("TWELVEDATA_API_KEY")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-PAIR = os.environ.get("PAIR", "EUR/USD")   # صيغة Twelve Data: EUR/USD
 
-STATE_FILE = "state.json"          # لتخزين آخر إشارة تم إرسالها (لتجنب التكرار)
+# الأزواج الرئيسية (Majors) + الفرعية (Minors) - يتم فحصها كلها كل تشغيلة
+DEFAULT_PAIRS = [
+    # ---- الأزواج الرئيسية ----
+    "EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF",
+    "AUD/USD", "USD/CAD", "NZD/USD",
+    # ---- الأزواج الفرعية ----
+    "EUR/GBP", "EUR/JPY", "GBP/JPY", "EUR/AUD",
+    "EUR/CHF", "AUD/JPY", "GBP/CHF",
+]
+
+# يمكن التحكم بالقائمة عبر GitHub Secret اسمه PAIRS (أزواج مفصولة بفاصلة)
+# مثال: EUR/USD,GBP/USD,USD/JPY - إن لم يوجد، تُستخدم القائمة الافتراضية أعلاه
+_pairs_env = os.environ.get("PAIRS")
+PAIRS = [p.strip() for p in _pairs_env.split(",")] if _pairs_env else DEFAULT_PAIRS
+
+STATE_FILE = "state.json"          # لتخزين آخر إشارة لكل زوج (لتجنب التكرار)
 ADX_THRESHOLD = 20                  # الحد الأدنى لقوة الترند
 RISK_REWARD_RATIO = 2.0             # نسبة المخاطرة إلى الربح 1:2
 ATR_PERIOD = 14
+DELAY_BETWEEN_PAIRS = 8             # ثوانٍ انتظار بين كل زوج وآخر (لتفادي حد الطلبات المجاني في Twelve Data)
 
 TWELVEDATA_URL = "https://api.twelvedata.com/time_series"
 
@@ -199,12 +215,12 @@ def in_active_session():
     return london or new_york
 
 
-# ==================== إدارة الحالة (لتجنب تكرار الإشارة) ====================
+# ==================== إدارة الحالة (لتجنب تكرار الإشارة لكل زوج) ====================
 def load_state():
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE, "r") as f:
             return json.load(f)
-    return {"last_signal_time": None}
+    return {}  # شكل الملف: { "EUR/USD": "2026-01-01 10:05:00", ... }
 
 
 def save_state(state):
@@ -234,46 +250,45 @@ def format_signal_message(pair, direction, entry, sl, tp, adx_value):
     )
 
 
-# ==================== المنطق الرئيسي ====================
-def run():
-    if not in_active_session():
-        print("خارج أوقات جلسة لندن/نيويورك - لا يوجد فحص")
-        return
-
-    df_h1 = fetch_candles(PAIR, "1h", count=100)
-    df_m5 = fetch_candles(PAIR, "5min", count=150)
+# ==================== فحص زوج واحد ====================
+def check_pair(pair, state):
+    """يفحص زوجاً واحداً، ويرسل إشارة إذا تحققت الشروط. يعيد True إذا أُرسلت إشارة"""
+    try:
+        df_h1 = fetch_candles(pair, "1h", count=100)
+        df_m5 = fetch_candles(pair, "5min", count=150)
+    except Exception as e:
+        print(f"[{pair}] فشل جلب البيانات: {e}")
+        return False
 
     if len(df_h1) < 60 or len(df_m5) < 40:
-        print("بيانات غير كافية")
-        return
+        print(f"[{pair}] بيانات غير كافية")
+        return False
 
     bias, adx_value = get_h1_bias(df_h1)
     if bias == "neutral":
-        print(f"لا يوجد ترند واضح (ADX={adx_value:.1f}) - لا إشارة")
-        return
+        print(f"[{pair}] لا يوجد ترند واضح (ADX={adx_value:.1f}) - لا إشارة")
+        return False
 
     highs, lows = find_pivots(df_m5)
     bos = detect_bos(df_m5, highs, lows)
 
     if bos != bias:
-        print("لا يوجد BOS متوافق مع اتجاه الفريم الأعلى")
-        return
+        print(f"[{pair}] لا يوجد BOS متوافق مع اتجاه الفريم الأعلى")
+        return False
 
-    sweep = detect_liquidity_sweep(df_m5)
     fvg_zones = detect_fvg(df_m5, bos)
     bos_index = len(df_m5) - 1
     order_block = detect_order_block(df_m5, bos_index, bos)
 
     # شرط الدخول: BOS متوافق + وجود منطقة FVG أو Order Block لدعم الإشارة
     if not fvg_zones and not order_block:
-        print("لا توجد منطقة FVG أو Order Block لدعم الإشارة")
-        return
+        print(f"[{pair}] لا توجد منطقة FVG أو Order Block لدعم الإشارة")
+        return False
 
-    state = load_state()
     current_candle_time = str(df_m5["time"].iloc[-1])
-    if state.get("last_signal_time") == current_candle_time:
-        print("تم إرسال إشارة لهذه الشمعة مسبقاً")
-        return
+    if state.get(pair) == current_candle_time:
+        print(f"[{pair}] تم إرسال إشارة لهذه الشمعة مسبقاً")
+        return False
 
     entry_price = df_m5["close"].iloc[-1]
     atr = calculate_atr(df_m5).iloc[-1]
@@ -285,11 +300,28 @@ def run():
         sl = entry_price + atr
         tp = entry_price - (atr * RISK_REWARD_RATIO)
 
-    message = format_signal_message(PAIR, bos, entry_price, sl, tp, adx_value)
+    message = format_signal_message(pair, bos, entry_price, sl, tp, adx_value)
     send_telegram_signal(message)
-    print("تم إرسال الإشارة بنجاح")
+    print(f"[{pair}] تم إرسال الإشارة بنجاح")
 
-    state["last_signal_time"] = current_candle_time
+    state[pair] = current_candle_time
+    return True
+
+
+# ==================== المنطق الرئيسي ====================
+def run():
+    if not in_active_session():
+        print("خارج أوقات جلسة لندن/نيويورك - لا يوجد فحص")
+        return
+
+    state = load_state()
+
+    for i, pair in enumerate(PAIRS):
+        check_pair(pair, state)
+        # انتظار قصير بين كل زوج لتفادي حد الطلبات المجاني في Twelve Data
+        if i < len(PAIRS) - 1:
+            time.sleep(DELAY_BETWEEN_PAIRS)
+
     save_state(state)
 
 
