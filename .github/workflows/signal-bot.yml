@@ -29,6 +29,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           PAIRS: ${{ secrets.PAIRS }}
+          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
         run: python signal_bot.py
 
       - name: ط­ظپط¸ ط­ط§ظ„ط© ط¢ط®ط± ط¥ط´ط§ط±ط© (state.json)
