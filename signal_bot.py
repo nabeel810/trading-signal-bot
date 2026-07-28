@@ -299,6 +299,7 @@ def load_state():
     # تحصين ضد ملف state.json بتنسيق قديم أو ناقص المفاتيح
     state.setdefault("last_signal", {})
     state.setdefault("open_trades", {})
+    state.setdefault("h1_cache", {})
     return state
 
 
@@ -448,20 +449,47 @@ def monitor_open_trade(pair, interval, trade):
     return trade
 
 
+# ==================== تخزين مؤقت لبيانات 1H (يقلل الطلبات إلى النصف تقريباً) ====================
+H1_CACHE_MINUTES = 55  # يُعاد جلب 1H فقط إذا مضى أكثر من 55 دقيقة على آخر جلب لهذا الزوج
+
+def get_cached_h1_bias(pair, state):
+    """يعيد (bias, adx_value) من الذاكرة المؤقتة إن كانت حديثة، وإلا يجلب بيانات جديدة ويحدّث الذاكرة"""
+    cache = state.setdefault("h1_cache", {})
+    cached = cache.get(pair)
+    now = datetime.now(timezone.utc)
+
+    if cached:
+        cached_time = datetime.fromisoformat(cached["timestamp"])
+        age_minutes = (now - cached_time).total_seconds() / 60
+        if age_minutes < H1_CACHE_MINUTES:
+            return cached["bias"], cached["adx"]
+
+    df_h1 = fetch_candles(pair, "1h", count=100)
+    if len(df_h1) < 60:
+        raise RuntimeError("بيانات 1H غير كافية")
+
+    bias, adx_value = get_h1_bias(df_h1)
+    cache[pair] = {
+        "bias": bias,
+        "adx": float(adx_value),
+        "timestamp": now.isoformat(),
+    }
+    return bias, adx_value
+
+
 # ==================== فحص زوج جديد (بحث عن إشارة دخول) ====================
 def check_pair(pair, interval, state, signals_this_run):
     try:
-        df_h1 = fetch_candles(pair, "1h", count=100)
+        bias, adx_value = get_cached_h1_bias(pair, state)
         df_entry = fetch_candles(pair, interval, count=150)
     except Exception as e:
         print(f"[{pair}] فشل جلب البيانات: {e}")
         return False
 
-    if len(df_h1) < 60 or len(df_entry) < 40:
+    if len(df_entry) < 40:
         print(f"[{pair}] بيانات غير كافية")
         return False
 
-    bias, adx_value = get_h1_bias(df_h1)
     if bias == "neutral":
         print(f"[{pair}] لا يوجد ترند واضح (ADX={adx_value:.1f})")
         return False
